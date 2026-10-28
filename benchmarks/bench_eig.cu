@@ -1,4 +1,5 @@
-// Benchmark: beig GPU kernel (one block per matrix) vs the vendor batched
+// Benchmark: beig GPU kernels (one block per matrix; per-vector inverse
+// iteration and the subspace-iteration variant) vs the vendor batched
 // eigensolver (cusolverDnXsyevBatched, the CUDA 13 batched path) and a naive
 // per-matrix cusolverDnXsyevd loop. GUE ensembles, uniform n per case.
 //
@@ -64,12 +65,15 @@ RngCase make_case(int n, int batch, uint64_t seed) {
     return c;
 }
 
-// Gate: max |w_gpu - w_cpu| <= 1e-12 * max(1, ||H||_F) for every matrix.
+// Gate: max |w_gpu - w_cpu| <= 1e-12 * max(1, ||H||_F) for every matrix,
+// on both GPU paths.
 void precondition(const RngCase& c, uint64_t seed) {
-    std::vector<double> w_gpu;
-    std::vector<cdouble> v_gpu;
+    double worst = 0.0, worst2 = 0.0;
+    std::vector<double> w_gpu, w_gpu2;
+    std::vector<cdouble> v_gpu, v_gpu2;
     beig::gpu::solve_batch_gpu(c.h.data(), c.n, c.batch, seed, w_gpu, v_gpu);
-    double worst = 0.0;
+    beig::gpu::solve_batch_gpu2(c.h.data(), c.n, c.batch, seed, w_gpu2,
+                                v_gpu2);
     for (int b = 0; b < c.batch; ++b) {
         const cdouble* A = c.h.data() + (size_t)b * c.n * c.n;
         const beig::EigResult r =
@@ -77,13 +81,18 @@ void precondition(const RngCase& c, uint64_t seed) {
         double fro = 0.0;
         for (int i = 0; i < c.n * c.n; ++i) fro += std::norm(A[i]);
         const double scale = std::max(1.0, sqrt(fro));
-        for (int i = 0; i < c.n; ++i)
+        for (int i = 0; i < c.n; ++i) {
             worst = std::max(
                 worst, std::abs(w_gpu[(size_t)b * c.n + i] - r.w[i]) / scale);
+            worst2 = std::max(
+                worst2,
+                std::abs(w_gpu2[(size_t)b * c.n + i] - r.w[i]) / scale);
+        }
     }
-    std::printf("  precondition: worst GPU-vs-CPU eval %.3e (tol 1e-12)\n",
-                worst);
-    if (!(worst < 1e-12))
+    std::printf("  precondition: worst GPU-vs-CPU eval %.3e, subspace %.3e "
+                "(tol 1e-12)\n",
+                worst, worst2);
+    if (!(worst < 1e-12) || !(worst2 < 1e-12))
         throw std::runtime_error("GPU-vs-CPU precondition failed");
 }
 
@@ -151,7 +160,7 @@ std::vector<int> parse_list(const std::string& s) {
 
 struct CaseResult {
     int n, batch;
-    RepTimes beig, vendor, loop;
+    RepTimes beig, beig2, vendor, loop;
 };
 
 void json_times(std::ofstream& f, const RepTimes& r, int indent) {
@@ -231,8 +240,8 @@ int main(int argc, char** argv) {
         cu_check(cusolverDnCreateParams(&params), "create params");
 
         std::printf("%4s %6s | %10s %10s | %10s %10s | %10s %10s\n", "n",
-                    "batch", "beig ms", "beig gpu", "vendor ms", "vendor gpu",
-                    "loop ms", "loop gpu");
+                    "batch", "beig ms", "beig gpu", "subs ms", "subs gpu",
+                    "vendor ms", "vendor gpu");
 
         std::vector<CaseResult> results;
         for (const int n : ns)
@@ -322,6 +331,14 @@ int main(int argc, char** argv) {
                     },
                     reps);
 
+                B.solve2(cseed); // allocates darena2; also the warmup
+                cr.beig2 = time_reps(
+                    [&]() {
+                        beig::gpu::eig2_batch_kernel<<<batch, beig::gpu::kThreads>>>(
+                            B.a, n, cseed, B.w, B.v, B.carena, B.darena2);
+                    },
+                    reps);
+
                 cr.vendor = time_reps(
                     [&]() {
                         restore();
@@ -350,18 +367,20 @@ int main(int argc, char** argv) {
                     reps);
 
                 results.push_back(cr);
-                std::printf("%4d %6d | %10.3f %10.3f | %10.3f %10.3f | "
-                            "%10.3f %10.3f\n",
+                std::printf("%4d %6d | %10.3f %10.3f | "
+                            "%10.3f %10.3f | %10.3f %10.3f\n",
                             n, batch, cr.beig.wall_median * 1e3,
                             cr.beig.gpu_median * 1e3,
+                            cr.beig2.wall_median * 1e3,
+                            cr.beig2.gpu_median * 1e3,
                             cr.vendor.wall_median * 1e3,
-                            cr.vendor.gpu_median * 1e3,
+                            cr.vendor.gpu_median * 1e3);
+                std::printf("            loop wall %.3f ms; wall spread ms "
+                            "[min,max]: beig [%.3f,%.3f] subs [%.3f,%.3f] "
+                            "vendor [%.3f,%.3f] loop [%.3f,%.3f]\n",
                             cr.loop.wall_median * 1e3,
-                            cr.loop.gpu_median * 1e3);
-                std::printf("            wall spread ms [min,max]: beig "
-                            "[%.3f,%.3f] vendor [%.3f,%.3f] loop "
-                            "[%.3f,%.3f]\n",
                             cr.beig.wall_min * 1e3, cr.beig.wall_max * 1e3,
+                            cr.beig2.wall_min * 1e3, cr.beig2.wall_max * 1e3,
                             cr.vendor.wall_min * 1e3,
                             cr.vendor.wall_max * 1e3, cr.loop.wall_min * 1e3,
                             cr.loop.wall_max * 1e3);
@@ -400,15 +419,24 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < results.size(); ++i) {
             const CaseResult& c = results[i];
             f << "    {\"n\": " << c.n << ", \"batch\": " << c.batch
-              << ", \"precondition\": \"gpu-vs-cpu eval < 1e-12*scale\",\n"
+              << ", \"precondition\": \"gpu-vs-cpu eval < 1e-12*scale, both "
+                 "gpu paths\",\n"
               << "     \"wall_speedup_vs_vendor\": "
               << c.vendor.wall_median / c.beig.wall_median
               << ", \"gpu_speedup_vs_vendor\": "
               << c.vendor.gpu_median / c.beig.gpu_median
+              << ", \"subspace_wall_speedup_vs_vendor\": "
+              << c.vendor.wall_median / c.beig2.wall_median
+              << ", \"subspace_gpu_speedup_vs_vendor\": "
+              << c.vendor.gpu_median / c.beig2.gpu_median
+              << ", \"subspace_vs_pervector_wall\": "
+              << c.beig.wall_median / c.beig2.wall_median
               << ", \"wall_speedup_vs_loop\": "
               << c.loop.wall_median / c.beig.wall_median << ",\n"
               << "     \"beig\": ";
             json_times(f, c.beig, 5);
+            f << ",\n     \"beig_subspace\": ";
+            json_times(f, c.beig2, 5);
             f << ",\n     \"vendor_xsyevbatched\": ";
             json_times(f, c.vendor, 5);
             f << ",\n     \"naive_xsyevd_loop\": ";

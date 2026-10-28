@@ -71,3 +71,8 @@ target_compile_options(bench_eig PRIVATE -Wall -Wextra)
 target_compile_definitions(bench_eig PRIVATE
   BEIG_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
   BEIG_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
+add_executable(bench_phases benchmarks/bench_phases.cu)
+target_link_libraries(bench_phases PRIVATE beig CUDA::cudart)
+target_include_directories(bench_phases PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+target_compile_options(bench_phases PRIVATE -Wall -Wextra)

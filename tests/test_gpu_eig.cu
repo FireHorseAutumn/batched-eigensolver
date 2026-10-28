@@ -66,6 +66,9 @@ void check_one(const cdouble* A, int n, const double* w_gpu,
         }
 }
 
+// Note: the GPU paths store eigenvector i as the contiguous slab
+// v_gpu + i*n (vector-major).
+
 constexpr double TOL_EVAL = 1e-12; // times max(1, ||H||_F), vs CPU reference
 constexpr double TOL_RES = 1e-12;  // times max(1, ||H||_F)
 constexpr double TOL_ORTH = 1e-11; // absolute
@@ -80,11 +83,17 @@ void report(const char* name, const Worst& wst) {
           name, buf);
 }
 
-// Solve a batch on both paths and fold every matrix into wst.
+// Solve a batch on one GPU path (0 = per-vector, 1 = subspace) and fold
+// every matrix into wst.
 void run_batch(const std::vector<cdouble>& Abatch, int n, int batch,
                uint64_t seed, Worst& wst, std::vector<double>& w_gpu,
-               std::vector<cdouble>& v_gpu) {
-    beig::gpu::solve_batch_gpu(Abatch.data(), n, batch, seed, w_gpu, v_gpu);
+               std::vector<cdouble>& v_gpu, int path = 0) {
+    if (path == 0)
+        beig::gpu::solve_batch_gpu(Abatch.data(), n, batch, seed, w_gpu,
+                                   v_gpu);
+    else
+        beig::gpu::solve_batch_gpu2(Abatch.data(), n, batch, seed, w_gpu,
+                                    v_gpu);
     for (int b = 0; b < batch; ++b) {
         const beig::EigResult r =
             beig::hermitian_eig(Abatch.data() + (size_t)b * n * n, n,
@@ -117,46 +126,62 @@ std::vector<cdouble> make_batch(int n, int batch, uint64_t seed,
 int main() {
     const uint64_t base = 0xB3162026ULL;
 
-    for (int n : {32, 64, 100, 128}) {
-        Worst wst;
-        std::vector<double> w_gpu;
-        std::vector<cdouble> v_gpu;
+    for (int n : {32, 64, 100, 128, 144}) {
         const std::vector<cdouble> Ab =
             make_batch(n, 4, base + 0x1000 + 16 * n, 0);
-        run_batch(Ab, n, 4, base + 0x1000 + 16 * n, wst, w_gpu, v_gpu);
-        char name[64];
-        std::snprintf(name, sizeof name, "GPU GUE n=%d (batch 4)", n);
-        report(name, wst);
-        if (n == 64) {
-            std::vector<double> w2;
-            std::vector<cdouble> v2;
-            beig::gpu::solve_batch_gpu(Ab.data(), n, 4,
-                                       base + 0x1000 + 16 * n, w2, v2);
-            const bool same =
-                std::memcmp(w_gpu.data(), w2.data(),
-                            w_gpu.size() * sizeof(double)) == 0 &&
-                std::memcmp(v_gpu.data(), v2.data(),
-                            v_gpu.size() * sizeof(cdouble)) == 0;
-            check(same, "GPU run-to-run bitwise determinism (n=64)",
-                  same ? "w and V bit-identical across reruns"
-                       : "MISMATCH across reruns");
+        for (int path : {0, 1}) {
+            Worst wst;
+            std::vector<double> w_gpu;
+            std::vector<cdouble> v_gpu;
+            run_batch(Ab, n, 4, base + 0x1000 + 16 * n, wst, w_gpu, v_gpu,
+                      path);
+            char name[80];
+            std::snprintf(name, sizeof name, "GPU%s GUE n=%d (batch 4)",
+                          path ? " subspace" : "", n);
+            report(name, wst);
+            if (n == 64) {
+                std::vector<double> w2;
+                std::vector<cdouble> v2;
+                if (path == 0)
+                    beig::gpu::solve_batch_gpu(Ab.data(), n, 4,
+                                               base + 0x1000 + 16 * n, w2,
+                                               v2);
+                else
+                    beig::gpu::solve_batch_gpu2(Ab.data(), n, 4,
+                                                base + 0x1000 + 16 * n, w2,
+                                                v2);
+                const bool same =
+                    std::memcmp(w_gpu.data(), w2.data(),
+                                w_gpu.size() * sizeof(double)) == 0 &&
+                    std::memcmp(v_gpu.data(), v2.data(),
+                                v_gpu.size() * sizeof(cdouble)) == 0;
+                check(same,
+                      path ? "GPU subspace run-to-run bitwise determinism "
+                             "(n=64)"
+                           : "GPU run-to-run bitwise determinism (n=64)",
+                      same ? "w and V bit-identical across reruns"
+                           : "MISMATCH across reruns");
+            }
         }
     }
 
     for (int n : {64, 128}) {
         for (int ens : {1, 2}) {
-            Worst wst;
-            std::vector<double> w_gpu;
-            std::vector<cdouble> v_gpu;
             const std::vector<cdouble> Ab =
                 make_batch(n, 4, base + 0x2000 + 16 * n + ens, ens);
-            run_batch(Ab, n, 4, base + 0x2000 + 16 * n + ens, wst, w_gpu,
-                      v_gpu);
-            char name[80];
-            std::snprintf(name, sizeof name,
-                          "GPU clustered n=%d jitter=%s (batch 4)", n,
-                          ens == 1 ? "0" : "1e-8");
-            report(name, wst);
+            for (int path : {0, 1}) {
+                Worst wst;
+                std::vector<double> w_gpu;
+                std::vector<cdouble> v_gpu;
+                run_batch(Ab, n, 4, base + 0x2000 + 16 * n + ens, wst, w_gpu,
+                          v_gpu, path);
+                char name[96];
+                std::snprintf(name, sizeof name,
+                              "GPU%s clustered n=%d jitter=%s (batch 4)",
+                              path ? " subspace" : "", n,
+                              ens == 1 ? "0" : "1e-8");
+                report(name, wst);
+            }
         }
     }
 
@@ -170,14 +195,18 @@ int main() {
             std::vector<cdouble> A = beigtest::zigzag_ribbon(W, k);
             Ab.insert(Ab.end(), A.begin(), A.end());
         }
-        Worst wst;
-        std::vector<double> w_gpu;
-        std::vector<cdouble> v_gpu;
-        run_batch(Ab, n, nks, base + 0x3000 + 64 * W, wst, w_gpu, v_gpu);
-        char name[80];
-        std::snprintf(name, sizeof name,
-                      "GPU zigzag ribbon W=%d n=%d (batch %d)", W, n, nks);
-        report(name, wst);
+        for (int path : {0, 1}) {
+            Worst wst;
+            std::vector<double> w_gpu;
+            std::vector<cdouble> v_gpu;
+            run_batch(Ab, n, nks, base + 0x3000 + 64 * W, wst, w_gpu, v_gpu,
+                      path);
+            char name[96];
+            std::snprintf(name, sizeof name,
+                          "GPU%s zigzag ribbon W=%d n=%d (batch %d)",
+                          path ? " subspace" : "", W, n, nks);
+            report(name, wst);
+        }
     }
 
     std::printf("%s (%d failure%s)\n",
