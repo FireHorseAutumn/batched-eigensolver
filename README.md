@@ -255,7 +255,7 @@ only remaining losses are the two smallest latency cells (32/64: 0.91x,
 story. The n = 128 tridiagonalization wall from round 2 is gone. Caveats
 unchanged: unpinned laptop, single evening, machine-state drift observed
 across sessions at the largest cells; pinned rerun scheduled (portfolio
-measurement day). Raw reps and metadata in
+measurement day — landed 2026-10-30, see round 4). Raw reps and metadata in
 [`data/eig_gpu_bench.json`](data/eig_gpu_bench.json).
 
 ### Round 4: per-matrix convergence exit (2026-10-26, evening)
@@ -274,30 +274,33 @@ path, run-to-run bitwise, CTest 3/3.
 Phase probe (n = 128/batch = 256, median of 11): subspace phase -48%,
 e2e 178 -> 136 ms. Average sweep count is ~2 of 4 on GUE spectra.
 
-Wall medians (ms), same protocol, one session:
+Wall medians (ms), same protocol, governor-pinned rerun 2026-10-30
+(performance governor on all CPUs, idle machine; the unpinned single-evening
+table it replaces differed only within drift — ratios moved <= 0.03x):
 
 | n | batch | per-vector | subspace | vendor batched | subs vs vendor |
 |---|---|---|---|---|---|
-| 32 | 64 | 5.0 | 1.9 | 2.3 | 1.21x |
+| 32 | 64 | 5.1 | 1.9 | 2.3 | 1.20x |
 | 32 | 256 | 13.7 | 5.3 | 7.2 | 1.38x |
-| 32 | 1024 | 54.4 | 20.4 | 28.6 | 1.41x |
-| 64 | 64 | 21.7 | 7.8 | 10.0 | 1.28x |
-| 64 | 256 | 58.4 | 23.1 | 37.3 | 1.61x |
-| 64 | 1024 | 230.7 | 89.2 | 149.2 | 1.67x |
-| 128 | 64 | 99.4 | 41.5 | 53.0 | 1.28x |
-| 128 | 256 | 278.5 | 140.2 | 198.9 | 1.42x |
-| 128 | 1024 | 1093.8 | 539.0 | 793.7 | 1.47x |
+| 32 | 1024 | 54.4 | 20.4 | 28.6 | 1.40x |
+| 64 | 64 | 21.6 | 7.8 | 10.0 | 1.28x |
+| 64 | 256 | 58.4 | 23.1 | 37.4 | 1.62x |
+| 64 | 1024 | 231.6 | 89.2 | 149.2 | 1.67x |
+| 128 | 64 | 100.3 | 41.5 | 53.0 | 1.28x |
+| 128 | 256 | 278.5 | 140.8 | 198.9 | 1.41x |
+| 128 | 1024 | 1094.9 | 529.7 | 793.6 | 1.50x |
 
 Read: the hand-written kernel beats `cusolverDnXsyevBatched` at ALL nine
-cells, 1.21–1.67x, every spread disjoint (tightest: 32/64 at [1.895,1.907]
-vs [2.279,2.315] ms; widest: 128/256 at ~9% on the subspace side). The
+cells, 1.20–1.67x, every spread disjoint (tightest: 32/64 at [1.895,1.909]
+vs [2.276,2.315] ms; widest: 128/256 at ~8% on the subspace side). The
 batch-64 latency cells flipped with the reduced per-matrix critical path —
 they were never about launch overhead on our side. This is the
 convergence-variance hypothesis measured: early termination across
 k-points, the property the vendor batched call lacks, is worth 22–24% e2e
-on top of the round-3 state. The MAGMA 2.5x factor remains unreached. Caveats unchanged:
-unpinned laptop, single evening; pinned rerun scheduled (portfolio
-measurement day). Raw reps and metadata in
+on top of the round-3 state. The MAGMA 2.5x factor remains unreached.
+Governor-pinned idle-machine rerun 2026-10-30 confirmed the unpinned
+round-4 table (all nine cells, same win/loss pattern, ratios within drift);
+the caveat is lifted. Raw reps and metadata in
 [`data/eig_gpu_bench.json`](data/eig_gpu_bench.json).
 
 Run: `cmake -B build && cmake --build build -j && ctest --test-dir build`.
